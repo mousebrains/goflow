@@ -491,7 +491,26 @@ def main():
         Ny_llc = nc.dimensions['lat'].size
 
     # Define training/test/validation regions
-    if Ny_llc >= 512 and Nx_llc >= 768:
+    if Ny_llc >= 800 and Nx_llc >= 1500:
+        # Physics-driven layout for the 17x30 deg Gulf Stream box (944x1666).
+        # Five 256x256 training tiles spanning distinct submesoscale regimes,
+        # plus a held-out test tile at the Stream south-wall mix:
+        #   T1 Sargasso SW       (25-30 N, -75 to -70 W)
+        #   T2 Sargasso E        (25-30 N, -60 to -55 W)
+        #   T3 NW slope water    (36-40 N, -80 to -75 W)
+        #   T4 Gulf Stream jet   (36-40 N, -70 to -65 W)
+        #   T5 Stream extension  (36-40 N, -60 to -55 W)
+        #   TEST south-wall mix  (30-35 N, -70 to -65 W)
+        train_inds = [
+            (0,   256, 256,  512),
+            (0,   256, 1100, 1356),
+            (600, 856, 0,    256),
+            (600, 856, 550,  806),
+            (600, 856, 1100, 1356),
+        ]
+        test_inds = (300, 556, 550, 806)
+        print('Using 17x30deg Gulf Stream physics-driven 5-tile layout')
+    elif Ny_llc >= 512 and Nx_llc >= 768:
         # Paper layout for full-size LLC
         train_inds = [
             (0, 256, 256, 512),

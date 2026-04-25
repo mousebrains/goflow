@@ -33,13 +33,19 @@ parser.add_argument('--full-year', action='store_true',
 parser.add_argument('--start', help='Override start date (YYYY-MM-DDTHH:MM:SS)')
 parser.add_argument('--end',   help='Override end date (inclusive)')
 parser.add_argument('--output', help='Override output NetCDF path')
+parser.add_argument('--lat-min', type=float, default=25.0, help='Region south boundary')
+parser.add_argument('--lat-max', type=float, default=42.0, help='Region north boundary')
+parser.add_argument('--lon-min', type=float, default=-80.0, help='Region west boundary')
+parser.add_argument('--lon-max', type=float, default=-50.0, help='Region east boundary')
+parser.add_argument('--chunk-days',  type=int, default=14, help='Time chunk size (days)')
+parser.add_argument('--buffer-days', type=int, default=3,  help='Butterworth buffer per chunk side (days)')
 ARGS = parser.parse_args()
 PROJECT = ARGS.project
 os.environ['GOOGLE_CLOUD_PROJECT'] = PROJECT
 
 # ---------------- config ----------------
-LAT_MIN, LAT_MAX = 25.0, 42.0
-LON_MIN, LON_MAX = -80.0, -50.0
+LAT_MIN, LAT_MAX = ARGS.lat_min, ARGS.lat_max
+LON_MIN, LON_MAX = ARGS.lon_min, ARGS.lon_max
 DLAT = DLON = 2.0 / 111.0   # ~2 km
 
 if ARGS.full_year:
@@ -51,8 +57,8 @@ else:
     WINDOW_END   = ARGS.end    or '2012-05-31T23:00:00'
     OUT_PATH     = ARGS.output or 'data/llc_pangeo_2012-04_to_2012-05.nc'
 
-CHUNK_DAYS  = 14
-BUFFER_DAYS = 3       # Butterworth filtfilt needs ~2.5 days of context
+CHUNK_DAYS  = ARGS.chunk_days
+BUFFER_DAYS = ARGS.buffer_days       # Butterworth filtfilt needs ~2.5 days of context
 CANDIDATE_FACES = (7, 10)
 
 BUTTER_CUTOFF_HOURS = 18.0

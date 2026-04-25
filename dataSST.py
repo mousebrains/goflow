@@ -147,7 +147,8 @@ class SatelliteDataset(Dataset):
             # Get velocity fields at the middle time step (i+12)
             u_slice = getData(self.nch, self.var_names[1], self.spatial_slice, idx + 12)
             v_slice = getData(self.nch, self.var_names[2], self.spatial_slice, idx + 12)
-            uv_slice = np.stack((u_slice, v_slice), axis=0).astype(np.float32)
+            uv_slice = np.nan_to_num(
+                np.stack((u_slice, v_slice), axis=0).astype(np.float32))
             return input_slice, uv_slice
         else:
             return input_slice
@@ -229,9 +230,11 @@ class SSTDataset(Dataset):
                 if self.sshFlag:
                     ssh_slice = getData(self.nch, self.var_names[3], self.spatial_slice, idx + (self.num_input_frames // 2) * self.step0)
             if self.sshFlag:
-                uv_slice = np.stack((u_slice, v_slice, ssh_slice), axis=0).astype(np.float32)
+                uv_slice = np.nan_to_num(
+                    np.stack((u_slice, v_slice, ssh_slice), axis=0).astype(np.float32))
             else:
-                uv_slice = np.stack((u_slice, v_slice), axis=0).astype(np.float32)
+                uv_slice = np.nan_to_num(
+                    np.stack((u_slice, v_slice), axis=0).astype(np.float32))
 
             return input_slice, uv_slice
         else:

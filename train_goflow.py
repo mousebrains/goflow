@@ -58,6 +58,12 @@ def parse_args():
                         help='Spectral/gradient loss weight (0-1)')
     parser.add_argument('--use_grad_loss', action='store_true',
                         help='Use gradient loss instead of spectral loss')
+    parser.add_argument('--init_from', type=str, default=None,
+                        help='Path to a .pth checkpoint to initialize weights from. '
+                             'Overrides the c_spec>0 auto-discovery convention.')
+    parser.add_argument('--layout', type=str, default='auto',
+                        choices=['auto', 'physics', 'paper', 'geometric', 'quadrant'],
+                        help='Training-tile layout. auto picks based on grid size.')
     
     # Training parameters
     parser.add_argument('--epochs', type=int, default=None,
@@ -80,6 +86,93 @@ def parse_args():
     parser.add_argument('--pn', type=float, default=5.0, help='Y grid metric')
     
     return parser.parse_args()
+
+
+def pick_layout(layout, Ny_llc, Nx_llc):
+    """Select training-tile indices by name, with sensible auto fallback.
+
+    Returns (train_inds, test_inds). All tiles are 256x256.
+    """
+    big = (Ny_llc >= 800 and Nx_llc >= 1500)
+    medium = (Ny_llc >= 512 and Nx_llc >= 768)
+    if layout == 'auto':
+        layout = 'physics' if big else ('paper' if medium else 'quadrant')
+
+    if layout == 'physics':
+        if not big:
+            raise SystemExit(
+                f'--layout physics requires LLC >=800x1500 (got {Ny_llc}x{Nx_llc}).')
+        # 17x30 deg Gulf Stream box (944x1666). Five 256x256 train tiles span
+        # distinct submesoscale regimes; test tile is the south-wall mix.
+        #   T1 Sargasso SW       (25-30 N, -75..-70 W)
+        #   T2 Sargasso E        (25-30 N, -60..-55 W)
+        #   T3 NW slope water    (36-40 N, -80..-75 W)
+        #   T4 Gulf Stream jet   (36-40 N, -70..-65 W)
+        #   T5 Stream extension  (36-40 N, -60..-55 W)
+        #   TEST south-wall mix  (30-35 N, -70..-65 W)
+        train_inds = [
+            (0,   256, 256,  512),
+            (0,   256, 1100, 1356),
+            (600, 856, 0,    256),
+            (600, 856, 550,  806),
+            (600, 856, 1100, 1356),
+        ]
+        test_inds = (300, 556, 550, 806)
+        print('Layout: physics (17x30 deg Gulf Stream, 5-tile)')
+    elif layout == 'paper':
+        if not medium:
+            raise SystemExit(
+                f'--layout paper requires LLC >=512x768 (got {Ny_llc}x{Nx_llc}).')
+        # Original paper layout: all tiles in the south half of the box.
+        train_inds = [
+            (0,   256, 256, 512),
+            (0,   256, 512, 768),
+            (256, 512, 256, 512),
+            (256, 512, 512, 768),
+            (256, 512, Nx_llc - 256, Nx_llc),
+        ]
+        test_inds = (0, 256, Nx_llc - 256, Nx_llc)
+        print('Layout: paper (south-half tiles)')
+    elif layout == 'geometric':
+        if Ny_llc < 256 or Nx_llc < 256:
+            raise SystemExit(
+                f'--layout geometric requires LLC >=256x256 (got {Ny_llc}x{Nx_llc}).')
+        # Evenly-spaced 5 train + 1 test tiles, no physics knowledge.
+        rows = max(1, Ny_llc // 256)
+        cols = max(1, Nx_llc // 256)
+        cells = []
+        for r in range(rows):
+            j0 = r * (Ny_llc - 256) // max(1, rows - 1) if rows > 1 else 0
+            for c in range(cols):
+                i0 = c * (Nx_llc - 256) // max(1, cols - 1) if cols > 1 else 0
+                cells.append((j0, j0 + 256, i0, i0 + 256))
+        if len(cells) < 6:
+            raise SystemExit(f'Need at least 6 cells of 256x256 (got {len(cells)}).')
+        step = len(cells) // 6
+        train_inds = [cells[i * step] for i in range(1, 6)]
+        test_inds = cells[len(cells) // 2]
+        if test_inds in train_inds:
+            idx = train_inds.index(test_inds)
+            for cand in cells:
+                if cand not in train_inds and cand != test_inds:
+                    train_inds[idx] = cand
+                    break
+        print(f'Layout: geometric ({rows}x{cols} grid, 5 train + 1 test)')
+    elif layout == 'quadrant':
+        # Pilot layout for small tiles
+        hy, hx = Ny_llc // 2, Nx_llc // 2
+        if hy < 16 or hx < 16:
+            raise SystemExit(f'Quadrant layout requires LLC >=32x32 (got {Ny_llc}x{Nx_llc}).')
+        train_inds = [
+            (0, hy, 0, hx),
+            (0, hy, hx, Nx_llc),
+            (hy, Ny_llc, 0, hx),
+        ]
+        test_inds = (hy, Ny_llc, hx, Nx_llc)
+        print(f'Layout: quadrant (LLC {Ny_llc}x{Nx_llc})')
+    else:
+        raise SystemExit(f'Unknown layout: {layout!r}')
+    return train_inds, test_inds
 
 
 def setup_device(cuda_idx: int) -> torch.device:
@@ -121,21 +214,35 @@ def train_epoch(
     """
     model.train()
     first_batch_losses = None
-    
-    for ib, (x, y) in enumerate(tqdm(train_loader, desc='Training')):
+
+    for ib, batch in enumerate(tqdm(train_loader, desc='Training')):
+        # Dataset returns (x, y, valid) when its target is masked; older code
+        # paths still return (x, y) — accept both.
+        if len(batch) == 3:
+            x, y, valid = batch
+            valid = valid.to(kernel_x.device)
+        else:
+            x, y = batch
+            valid = None
         x, y = x.to(kernel_x.device), y.to(kernel_x.device)
-        
+
         y_pred = model(x)
-        
-        # Pointwise L1 loss with boundary masking
-        loss_l1 = criterion(
-            y.squeeze() * mask[None, None, :, :],
-            y_pred.squeeze() * mask[None, None, :, :]
-        )
-        
-        # Auxiliary loss (gradient or spectral)
+
+        # Pointwise L1 with boundary mask + (when available) per-pixel validity
+        # mask, so NaN-filled coastline targets don't bias the model toward zero.
+        if valid is not None:
+            weight = (mask[None, None, :, :] * valid.unsqueeze(1)).expand_as(y)
+            loss_l1 = (y_pred - y).abs().mul(weight).sum() / weight.sum().clamp_min(1e-6)
+        else:
+            loss_l1 = criterion(
+                y.squeeze() * mask[None, None, :, :],
+                y_pred.squeeze() * mask[None, None, :, :]
+            )
+
+        # Auxiliary loss (gradient or spectral). Targets are zero-filled on
+        # land; spectral loss tolerates this for tiles with small mask area.
         if use_grad_loss:
-            loss_aux = gradient_loss(y_pred.squeeze(), y.squeeze(), criterion, 
+            loss_aux = gradient_loss(y_pred.squeeze(), y.squeeze(), criterion,
                                      mask, kernel_x, kernel_y)
         else:
             loss_aux = spectral_loss(y_pred, y, tukey_window)
@@ -174,16 +281,24 @@ def evaluate_model(
     count = 0
     
     with torch.no_grad():
-        for x, y in tqdm(test_loader, desc='Evaluating'):
+        for batch in tqdm(test_loader, desc='Evaluating'):
+            if len(batch) == 3:
+                x, y, valid = batch
+                valid = valid.to(kernel_x.device)
+            else:
+                x, y = batch
+                valid = None
             x, y = x.to(kernel_x.device), y.to(kernel_x.device)
             y_pred = model(x)
-            
+
             # Spectral loss
             spec_loss = spectral_loss(y_pred, y, tukey_window)
-            
-            # R² on gradient fields (vorticity + strain)
+
+            # R² on gradient fields (vorticity + strain). Boundary mask only;
+            # validity-mask-aware R² is left as a TODO (sklearn r2_score path
+            # would need broadcasting + careful zero-variance handling).
             r2 = compute_gradient_r2(y, y_pred, kernel_x, kernel_y, mask)
-            
+
             total_r2 += r2
             total_spec_loss += spec_loss.item()
             count += 1
@@ -230,7 +345,8 @@ def train_model(
         
         # Initialize mask/window on first epoch using data shape
         if mask is None:
-            sample_x, sample_y = next(iter(train_loader))
+            sample_batch = next(iter(train_loader))
+            sample_y = sample_batch[1]
             shape = sample_y.shape[-2:]
             mask = create_boundary_mask(shape).to(device)
             tukey_window = create_tukey_window(shape).to(device)
@@ -393,7 +509,11 @@ def write_test_results(
     pred_grads_list = []
     
     with torch.no_grad():
-        for x, y_true in tqdm(test_loader, desc='Processing test set'):
+        for batch in tqdm(test_loader, desc='Processing test set'):
+            if len(batch) == 3:
+                x, y_true, _valid = batch
+            else:
+                x, y_true = batch
             x, y_true = x.to(device), y_true.to(device)
             y_pred = model(x)
             
@@ -490,46 +610,7 @@ def main():
         Nx_llc = nc.dimensions['lon'].size
         Ny_llc = nc.dimensions['lat'].size
 
-    # Define training/test/validation regions
-    if Ny_llc >= 800 and Nx_llc >= 1500:
-        # Physics-driven layout for the 17x30 deg Gulf Stream box (944x1666).
-        # Five 256x256 training tiles spanning distinct submesoscale regimes,
-        # plus a held-out test tile at the Stream south-wall mix:
-        #   T1 Sargasso SW       (25-30 N, -75 to -70 W)
-        #   T2 Sargasso E        (25-30 N, -60 to -55 W)
-        #   T3 NW slope water    (36-40 N, -80 to -75 W)
-        #   T4 Gulf Stream jet   (36-40 N, -70 to -65 W)
-        #   T5 Stream extension  (36-40 N, -60 to -55 W)
-        #   TEST south-wall mix  (30-35 N, -70 to -65 W)
-        train_inds = [
-            (0,   256, 256,  512),
-            (0,   256, 1100, 1356),
-            (600, 856, 0,    256),
-            (600, 856, 550,  806),
-            (600, 856, 1100, 1356),
-        ]
-        test_inds = (300, 556, 550, 806)
-        print('Using 17x30deg Gulf Stream physics-driven 5-tile layout')
-    elif Ny_llc >= 512 and Nx_llc >= 768:
-        # Paper layout for full-size LLC
-        train_inds = [
-            (0, 256, 256, 512),
-            (0, 256, 512, 768),
-            (256, 512, 256, 512),
-            (256, 512, 512, 768),
-            (256, 512, Nx_llc - 256, Nx_llc),
-        ]
-        test_inds = (0, 256, Nx_llc - 256, Nx_llc)
-    else:
-        # Pilot layout: quadrant split for a single small tile
-        hy, hx = Ny_llc // 2, Nx_llc // 2
-        train_inds = [
-            (0, hy, 0, hx),
-            (0, hy, hx, Nx_llc),
-            (hy, Ny_llc, 0, hx),
-        ]
-        test_inds = (hy, Ny_llc, hx, Nx_llc)
-        print(f'Pilot index layout: LLC {Ny_llc}x{Nx_llc} split into quadrants')
+    train_inds, test_inds = pick_layout(args.layout, Ny_llc, Nx_llc)
 
     valid_inds = (0, 512, Nx - 768, Nx) if (Ny >= 512 and Nx >= 768) else (0, Ny, 0, Nx)
     args.valid_inds = valid_inds
@@ -553,7 +634,8 @@ def main():
                                                    num_workers=nw)
     
     # Initialize model
-    sample_x, sample_y = next(iter(test_loader))
+    sample_batch = next(iter(test_loader))
+    sample_x, sample_y = sample_batch[0], sample_batch[1]
     n_input, n_output = sample_x.shape[1], sample_y.shape[1]
     
     model = initialize_model(
@@ -564,14 +646,21 @@ def main():
         device=device
     )
     
-    # Load pretrained weights if using spectral loss
+    # Load pretrained weights. Explicit --init_from wins; otherwise fall back to
+    # the c_spec>0 auto-discovery convention (stage 1 -> stage 2 chain).
     model_str = get_model_string(args.model, args.nbase, args.kernel_size, args.use_grad_loss)
-    if args.c_spec > 0:
+    if args.init_from:
+        if not os.path.exists(args.init_from):
+            raise SystemExit(f'--init_from {args.init_from!r} does not exist')
+        print(f'Loading initial weights from {args.init_from}')
+        model = load_model(model, args.init_from, device)
+    elif args.c_spec > 0:
         stage0_file = f'{model_str}_{args.step0}_{args.nframes}_0.0cs.pth'
         if os.path.exists(stage0_file):
+            print(f'Loading stage-1 checkpoint {stage0_file}')
             model = load_model(model, stage0_file, device)
         else:
-            print(f'Warning: Stage 0 checkpoint {stage0_file} not found, starting from scratch')
+            print(f'Warning: stage-1 checkpoint {stage0_file} not found, starting from scratch')
     
     # Setup optimizer
     optimizer = torch.optim.AdamW(

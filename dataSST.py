@@ -230,13 +230,16 @@ class SSTDataset(Dataset):
                 if self.sshFlag:
                     ssh_slice = getData(self.nch, self.var_names[3], self.spatial_slice, idx + (self.num_input_frames // 2) * self.step0)
             if self.sshFlag:
-                uv_slice = np.nan_to_num(
-                    np.stack((u_slice, v_slice, ssh_slice), axis=0).astype(np.float32))
+                uv_raw = np.stack((u_slice, v_slice, ssh_slice), axis=0).astype(np.float32)
             else:
-                uv_slice = np.nan_to_num(
-                    np.stack((u_slice, v_slice), axis=0).astype(np.float32))
+                uv_raw = np.stack((u_slice, v_slice), axis=0).astype(np.float32)
+            # Validity mask: 1.0 where every channel of the target is finite, else 0.
+            # Used by the mask-aware L1 in the train loop so coast/land pixels
+            # (which are NaN -> 0 below) don't bias the model toward zero flow.
+            valid_mask = np.isfinite(uv_raw).all(axis=0).astype(np.float32)
+            uv_slice = np.nan_to_num(uv_raw)
 
-            return input_slice, uv_slice
+            return input_slice, uv_slice, valid_mask
         else:
             return input_slice
 

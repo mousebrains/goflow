@@ -83,11 +83,15 @@ def parse_args():
 
 
 def setup_device(cuda_idx: int) -> torch.device:
-    """Configure CUDA device and clear memory."""
-    device = torch.device(f'cuda:{cuda_idx}' if torch.cuda.is_available() else 'cpu')
+    """Pick CUDA, then Apple MPS, then CPU."""
     if torch.cuda.is_available():
+        device = torch.device(f'cuda:{cuda_idx}')
         torch.cuda.set_device(cuda_idx)
         torch.cuda.empty_cache()
+    elif torch.backends.mps.is_available():
+        device = torch.device('mps')
+    else:
+        device = torch.device('cpu')
     gc.collect()
     print(f'Device: {device}')
     return device
@@ -266,7 +270,7 @@ def train_model(
             )
             
             # Write satellite predictions
-            output_file = f'preds_{model_str}_{config.step0}_{config.nframes}_{config.c_spec}cs{config.goes_file}'
+            output_file = f'preds_{model_str}_{config.step0}_{config.nframes}_{config.c_spec}cs_{os.path.splitext(os.path.basename(config.goes_file))[0]}.nc'
             write_satellite_netcdf(output_file, out_val, grad_val, sst_val,
                                    config.valid_inds, config.goes_file)
         
@@ -302,7 +306,8 @@ def run_satellite_inference(
     kernel_y = dy_kernel(pn).to(device)
     
     goes_dataset = SatelliteDataset(goes_file, ['log_gradT'], valid_inds, train=False)
-    goes_loader = DataLoader(goes_dataset, batch_size=batch_size, shuffle=False, num_workers=4)
+    nw = 0 if sys.platform == 'darwin' else 4
+    goes_loader = DataLoader(goes_dataset, batch_size=batch_size, shuffle=False, num_workers=nw)
     
     out_list = []
     grad_list = []
@@ -477,22 +482,38 @@ def main():
     if args.epochs is None:
         args.epochs = 100 if args.c_spec == 0 else 50
     
-    # Get grid dimensions from GOES file
+    # Get grid dimensions from GOES and LLC files
     with NCDataset(args.goes_file, 'r') as nc:
         Nx = nc.dimensions['lon'].size
         Ny = nc.dimensions['lat'].size
-    
+    with NCDataset(args.llc_file, 'r') as nc:
+        Nx_llc = nc.dimensions['lon'].size
+        Ny_llc = nc.dimensions['lat'].size
+
     # Define training/test/validation regions
-    train_inds = [
-        (0, 256, 256, 512),
-        (0, 256, 512, 768),
-        (256, 512, 256, 512),
-        (256, 512, 512, 768),
-        (256, 512, Nx - 256, Nx)
-    ]
-    test_inds = (0, 256, Nx - 256, Nx)
-    valid_inds = (0, 512, Nx - 768, Nx)
-    args.valid_inds = valid_inds  # Store for later use
+    if Ny_llc >= 512 and Nx_llc >= 768:
+        # Paper layout for full-size LLC
+        train_inds = [
+            (0, 256, 256, 512),
+            (0, 256, 512, 768),
+            (256, 512, 256, 512),
+            (256, 512, 512, 768),
+            (256, 512, Nx_llc - 256, Nx_llc),
+        ]
+        test_inds = (0, 256, Nx_llc - 256, Nx_llc)
+    else:
+        # Pilot layout: quadrant split for a single small tile
+        hy, hx = Ny_llc // 2, Nx_llc // 2
+        train_inds = [
+            (0, hy, 0, hx),
+            (0, hy, hx, Nx_llc),
+            (hy, Ny_llc, 0, hx),
+        ]
+        test_inds = (hy, Ny_llc, hx, Nx_llc)
+        print(f'Pilot index layout: LLC {Ny_llc}x{Nx_llc} split into quadrants')
+
+    valid_inds = (0, 512, Nx - 768, Nx) if (Ny >= 512 and Nx >= 768) else (0, Ny, 0, Nx)
+    args.valid_inds = valid_inds
     
     # Batch sizes depend on model complexity
     if args.model == 'samudra0' or args.nbase == 32:
@@ -506,7 +527,11 @@ def main():
         args.llc_file, varlist, train_inds, test_inds,
         step0=args.step0, nframes=args.nframes
     )
-    train_loader, test_loader = create_dataloaders(train_data, test_data, batch_sizes=batch_sizes)
+    # num_workers=0 on macOS (netCDF handles don't survive process spawn)
+    nw = 0 if sys.platform == 'darwin' else 5
+    train_loader, test_loader = create_dataloaders(train_data, test_data,
+                                                   batch_sizes=batch_sizes,
+                                                   num_workers=nw)
     
     # Initialize model
     sample_x, sample_y = next(iter(test_loader))
@@ -557,7 +582,7 @@ def main():
         args.pm, args.pn
     )
     
-    output_file = f'preds_{model_str}_{args.step0}_{args.nframes}_{args.c_spec}cs{args.goes_file}'
+    output_file = f'preds_{model_str}_{args.step0}_{args.nframes}_{args.c_spec}cs_{os.path.splitext(os.path.basename(args.goes_file))[0]}.nc'
     write_satellite_netcdf(output_file, out_val, grad_val, sst_val, args.valid_inds, args.goes_file)
     
     print('Training complete!')

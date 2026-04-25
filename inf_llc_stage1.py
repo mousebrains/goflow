@@ -77,10 +77,14 @@ def parse_args() -> argparse.Namespace:
 
 
 def setup_device(cuda_idx: int) -> torch.device:
-    """Configure CUDA device."""
-    device = torch.device(f'cuda:{cuda_idx}' if torch.cuda.is_available() else 'cpu')
+    """Pick CUDA, then Apple MPS, then CPU."""
     if torch.cuda.is_available():
+        device = torch.device(f'cuda:{cuda_idx}')
         torch.cuda.set_device(cuda_idx)
+    elif torch.backends.mps.is_available():
+        device = torch.device('mps')
+    else:
+        device = torch.device('cpu')
     print(f'Device: {device}')
     return device
 

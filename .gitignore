@@ -7,3 +7,5 @@ test_*.nc
 __pycache__/
 *.pyc
 .DS_Store
+# Rendered session script — regenerable from the JSONL, contains paths/emails
+presentation/session_script.md

@@ -1,0 +1,9 @@
+data/
+ncfiles/
+preds_*.nc
+test_*.nc
+*.pth
+*.npy
+__pycache__/
+*.pyc
+.DS_Store

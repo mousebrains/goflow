@@ -221,9 +221,15 @@ The JSON summary tracks selected gradient R2, velocity R2, spectral loss, and
 the best velocity/spectral epochs. These additions do not change the model,
 losses, optimizer, or default training split.
 
-## Spatial Transferability
+## Spatial Transferability limitation
 
-An optional spatial transferability demo is documented in
+A limitation of the current goflow paradigm is that trafernsability of training to far off target regions is still lacking.
+A key reason is related to input normalization, which remains difficult to address because there is no climatology of log[grad T],
+our input variable. This can be alleviated by normalizing the input log[grad T] at each spatial point with the mean and variance across time
+(this is an year for the LLC4320 solution). However this is still being tested. For adjacent regions, inpBN=True (a default which enables input Batch Normalization)
+works very well.
+
+The issue with spatial transferability is documented in
 [`docs/spatial_transferability.md`](docs/spatial_transferability.md). It uses
 the original GOFLOW architecture and training recipe with user-provided
 held-out spatial boxes and includes one example stage-1 fold map. This is a

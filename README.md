@@ -6,6 +6,11 @@ Deep learning framework for predicting ocean surface velocity fields from satell
 
 GOFLOW trains neural networks to infer ocean flow dynamics (U, V velocity components) from thermal gradient patterns observed in satellite imagery. The approach leverages the physical relationship between SST gradients and surface currents to enable velocity estimation from widely available satellite observations.
 
+**IGW filtering note: GOFLOW predicts velocities with internal gravity wave
+(IGW) variability removed. The LLC training velocities are filtered with an
+18-hour window to eliminate IGWs, while SST gradients are used as input because
+SST is not strongly affected by IGWs.**
+
 **Key Features:**
 - Multiple neural network architectures (UNet, ConvNeXt-style, lightweight CNN)
 - Hybrid loss functions combining L1, spectral, and gradient-based losses
@@ -33,6 +38,23 @@ pip install torch numpy scipy scikit-learn netCDF4 tqdm
 ```
 
 ## Quick Start
+
+### Training Data
+
+The small LLC-subset training file used by the paper-scale examples is
+`llcGoes_gradT_trunc.nc`. Download it from Google Drive (around 125 GB):
+
+https://drive.google.com/file/d/1fbwdcDnkHZ6UJMr4QM_qP2AFX9faAzeC/view?usp=sharing
+
+Place the file in the repository root, or pass its location with `--llc_file`.
+### GOES satellite inference Data
+The GOES datasets which have been used to generate the figures in the paper and for validation and testing are provided below.
+- the dataset that corresponds to the NESMA experiment used for validating GOFLOW
+  https://drive.google.com/file/d/1i7Ml9LxQEA0hMmVASdIwan8dv3y1tV_l/view?usp=drive_link
+- the dataset that has a clean cloud free period of data and was used to generate Figure 1
+  https://drive.google.com/file/d/15WUoI8p8r2pgb69QdU3g4ydUR0m8Q9Wb/view?usp=drive_link
+
+Both these datasets have been preprocessed to add log[grad T] inputs and can be directly used with the inference scripts.
 
 ### Training
 
@@ -108,6 +130,11 @@ Where `auxiliary_loss` is either:
 | `--tcycle` | 5 | Cosine annealing cycle length |
 | `--nframes` | 3 | Number of input SST frames |
 | `--step0` | 1 | Time step stride between frames |
+| `--skip_satellite` | False | Skip satellite inference/writes during training |
+| `--skip_eval_nc` | False | Skip bulky test-set NetCDF exports |
+| `--metrics_file` | - | Optional JSON output for metric histories and best values |
+| `--regions_file` | - | Optional JSON file of spatial boxes for transfer tests |
+| `--fold` | -1 | Held-out box index when using `--regions_file` |
 
 ## Inference Arguments
 
@@ -156,6 +183,8 @@ NetCDF file with:
 
 - SST gradient (`loggrad_T`): Range [-19, 0] normalized to [0, 1]
 - SST: Range [0, 30°C] normalized to [0, 1]
+- The UNet has a pretty non-standard option, namely input Batch Normalization turned on by default
+  (this must agree between training and inference) and this alleviates normalization issues substantially.
 
 ## Two-Stage Training Workflow
 
@@ -186,6 +215,38 @@ lgt_<model><nbase>_<step0>_<nframes>_<c_spec>cs.pth
 
 Example: `lgt_unet16_1_3_0.5cs.pth`
 
+## Reproduction Metrics
+
+Training now writes compact metric artifacts in addition to the legacy
+`r2_*.npy` file:
+
+- `metrics_<model>_ver_<c_spec>cs.json`: configuration, per-epoch histories,
+  and selected-checkpoint metrics
+- `metrics_<model>_ver_<c_spec>cs.npz`: NumPy form of the same histories and
+  summary values
+
+The JSON summary tracks selected gradient R2, velocity R2, spectral loss, and
+the best velocity/spectral epochs. These additions do not change the model,
+losses, optimizer, or default training split.
+
+## Spatial Transferability limitation
+
+A limitation of the current goflow paradigm is that transferability of trained models to far off target regions is still lacking.
+A key reason is related to input normalization, which remains difficult to address because there is no climatology of log[grad T],
+our input variable. This can be alleviated by normalizing the input log[grad T] at each spatial point with the mean and variance across time
+(this is an year for the LLC4320 solution). However this is still being tested. For adjacent regions, inpBN=True (a default which enables input Batch Normalization)
+works very well.
+
+The figure below is an example stage-1 fold map from a larger LLC-domain demo.
+It shows held-out fold locations (i.e. one of the 5 regions is test and the other are for training) with the selected-checkpoint velocity and
+gradient R2 values. It is included here to illustrate limitations of the existing
+GOFLOW approach under spatial transfer, not to introduce a new method. In the plot
+g referes to gradient (an average of the vorticity R2 and strain magnitude R2) and v to velocity R2. Note the wide variability of the 
+gradient accuracy from a 0.5 to as low as 0.19.
+![Stage 1 spatial transferability demo](docs/figures/spatial_transfer_stage1.png)
+
+This option is is already present in the existing repo but the larger LLC domain data is currently not provided due to its size, but will be included 
+as part of upcoming work.
 ## Citation
 
 If you use GOFLOW in your research, please cite:
@@ -194,9 +255,12 @@ If you use GOFLOW in your research, please cite:
 @article{lenain2026unprecedented,
   title={An unprecedented view of ocean currents from geostationary satellites},
   author={Lenain, Luc and Srinivasan, Kaushik and Barkan, Roy and Pizzo, Nick},
-  journal={Nature Geosciences},
+  journal={Nature Geoscience},
   year={2026},
-  note={in press}
+  month={Apr},
+  day={13},
+  doi={10.1038/s41561-026-01943-0},
+  url={https://doi.org/10.1038/s41561-026-01943-0}
 }
 ```
 

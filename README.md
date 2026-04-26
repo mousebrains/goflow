@@ -223,28 +223,21 @@ losses, optimizer, or default training split.
 
 ## Spatial Transferability limitation
 
-A limitation of the current goflow paradigm is that traferability of trained models to far off target regions is still lacking.
+A limitation of the current goflow paradigm is that transferability of trained models to far off target regions is still lacking.
 A key reason is related to input normalization, which remains difficult to address because there is no climatology of log[grad T],
 our input variable. This can be alleviated by normalizing the input log[grad T] at each spatial point with the mean and variance across time
 (this is an year for the LLC4320 solution). However this is still being tested. For adjacent regions, inpBN=True (a default which enables input Batch Normalization)
 works very well.
 
-The issue with spatial transferability is documented in
-[`docs/spatial_transferability.md`](docs/spatial_transferability.md). 
 The figure below is an example stage-1 fold map from a larger LLC-domain demo.
-It shows held-out fold locations with the selected-checkpoint velocity and
-gradient R2 values. It is included to illustrate limitations of the existing
+It shows held-out fold locations (i.e. one of the 5 regions is test and the other are for training) with the selected-checkpoint velocity and
+gradient R2 values. It is included here to illustrate limitations of the existing
 GOFLOW approach under spatial transfer, not to introduce a new method. In the plot
 g referes to gradient (an average of the vorticity R2 and strain magnitude R2) and v to velocity R2. Note the wide variability of the 
 gradient accuracy from a 0.5 to as low as 0.19.
 
-![Stage 1 spatial transferability demo](docs/figures/spatial_transfer_stage1.png)
-It uses
-the original GOFLOW architecture and training recipe with user-provided
-held-out spatial boxes and includes one example stage-1 fold map. This is a
-demo harness for the existing approach, not a new model or a replacement for
-the paper benchmark.
-
+This option is is already present in the existing repo but the larger LLC domain data is currently not provided due to its size, but will be included 
+as part of upcoming work.
 ## Citation
 
 If you use GOFLOW in your research, please cite:

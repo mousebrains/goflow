@@ -183,6 +183,8 @@ NetCDF file with:
 
 - SST gradient (`loggrad_T`): Range [-19, 0] normalized to [0, 1]
 - SST: Range [0, 30°C] normalized to [0, 1]
+- The UNet has a pretty non-standard option, namely input Batch Normalization turned on by default
+  (this must agree between training and inference) and this alleviates normalization issues substantially.
 
 ## Two-Stage Training Workflow
 

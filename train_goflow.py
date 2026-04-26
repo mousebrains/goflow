@@ -369,39 +369,34 @@ def train_model(
         # Evaluate
         r2, spec_loss = evaluate_model(model, test_loader, kernel_x, kernel_y, mask, tukey_window)
         r2_history[epoch] = r2
-        
-        # Track best model
+
+        # Track best model. Per-epoch we ONLY save the .pth checkpoint —
+        # the 8 GB test NetCDF and 90 GB satellite-prediction NetCDF are
+        # deferred to the end of training (run once on the best-overall
+        # model in main()). Doing them every "best epoch" caused hundreds
+        # of GB of disk churn and 20+ GB transient RAM allocations that
+        # contributed to a jetsam kill on the first year-long run.
         if r2 > best_r2:
             best_r2 = r2
             best_model = deepcopy(model)
-            
-            # Save checkpoint and run inference
             checkpoint_path = f'{model_str}_{config.step0}_{config.nframes}_{config.c_spec}cs.pth'
             save_model(best_model, checkpoint_path)
-            
-            # Write test results
-            write_test_results(
-                epoch, best_model, test_loader, kernel_x, kernel_y,
-                config.c_spec, model_str, config.output_dir
-            )
 
-            # Streaming satellite inference + write (bounded memory).
-            output_file = (f'preds_{model_str}_{config.step0}_{config.nframes}_'
-                           f'{config.c_spec}cs_'
-                           f'{os.path.splitext(os.path.basename(config.goes_file))[0]}.nc')
-            output_path = os.path.join(config.output_dir, output_file)
-            run_satellite_inference(
-                best_model, config.goes_file, config.valid_inds,
-                config.pm, config.pn, output_file=output_path
-            )
-            writeGridSat(config.goes_file, output_path, config.valid_inds)
-        
         if spec_loss < best_spec:
             best_spec = spec_loss
-        
+
+        # Per-epoch peak resident memory line so we can spot leaks early.
+        # macOS ru_maxrss is in BYTES, Linux is in KILOBYTES — handle both.
+        try:
+            import resource, sys as _sys
+            raw = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+            divisor = (1024 ** 3) if _sys.platform == 'darwin' else (1024 ** 2)
+            mem_str = f'  | peak RSS: {raw / divisor:.2f} GB'
+        except Exception:
+            mem_str = ''
         print(f'Epoch {epoch+1}/{config.epochs} | R²: {r2:.4f} (best: {best_r2:.4f}) | '
-              f'Spec: {spec_loss:.4f} (best: {best_spec:.4f})')
-    
+              f'Spec: {spec_loss:.4f} (best: {best_spec:.4f}){mem_str}')
+
     return best_model, r2_history
 
 
@@ -740,8 +735,16 @@ def main():
     # Save final results
     np.save(f'r2_{model_str}_ver_{args.c_spec}cs.npy', r2_history)
     save_model(best_model, f'{model_str}_{args.step0}_{args.nframes}_{args.c_spec}cs.pth')
-    
-    # Final satellite inference (streaming write — bounded memory).
+
+    # Final test-set + satellite predictions, run once on the best model.
+    # (Per-epoch writes were removed — see train_model for rationale.)
+    kernel_x = dx_kernel(args.pm).to(device)
+    kernel_y = dy_kernel(args.pn).to(device)
+    write_test_results(
+        args.epochs, best_model, test_loader, kernel_x, kernel_y,
+        args.c_spec, model_str, args.output_dir
+    )
+
     output_file = (f'preds_{model_str}_{args.step0}_{args.nframes}_'
                    f'{args.c_spec}cs_'
                    f'{os.path.splitext(os.path.basename(args.goes_file))[0]}.nc')

@@ -230,7 +230,16 @@ our input variable. This can be alleviated by normalizing the input log[grad T] 
 works very well.
 
 The issue with spatial transferability is documented in
-[`docs/spatial_transferability.md`](docs/spatial_transferability.md). It uses
+[`docs/spatial_transferability.md`](docs/spatial_transferability.md). 
+The figure below is an example stage-1 fold map from a larger LLC-domain demo.
+It shows held-out fold locations with the selected-checkpoint velocity and
+gradient R2 values. It is included to illustrate limitations of the existing
+GOFLOW approach under spatial transfer, not to introduce a new method. In the plot
+g referes to gradient (an average of the vorticity R2 and strain magnitude R2) and v to velocity R2. Note the wide variability of the 
+gradient accuracy from a 0.5 to as low as 0.19.
+
+![Stage 1 spatial transferability demo](figures/spatial_transfer_stage1.png)
+It uses
 the original GOFLOW architecture and training recipe with user-provided
 held-out spatial boxes and includes one example stage-1 fold map. This is a
 demo harness for the existing approach, not a new model or a replacement for

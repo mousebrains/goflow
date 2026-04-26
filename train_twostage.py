@@ -47,20 +47,20 @@ def main():
         cmd1 = [sys.executable, train_py, '--c_spec', '0.0'] + passthrough
         if args.epochs_stage1 is not None:
             cmd1 += ['--epochs', str(args.epochs_stage1)]
-        print(f'\n=== Stage 1: L1-only ===\n  {" ".join(cmd1)}\n')
+        print(f'\n=== Stage 1: L1-only ===\n  {" ".join(cmd1)}\n', flush=True)
         subprocess.check_call(cmd1)
     else:
-        print('Skipping stage 1 (--skip_stage1)')
+        print('Skipping stage 1 (--skip_stage1)', flush=True)
 
     cmd2 = [sys.executable, train_py,
             '--c_spec', str(args.c_spec_stage2)] + passthrough
     if args.epochs_stage2 is not None:
         cmd2 += ['--epochs', str(args.epochs_stage2)]
     print(f'\n=== Stage 2: L1 + spectral (c_spec={args.c_spec_stage2}) ===\n'
-          f'  {" ".join(cmd2)}\n')
+          f'  {" ".join(cmd2)}\n', flush=True)
     subprocess.check_call(cmd2)
 
-    print('\nTwo-stage training complete.')
+    print('\nTwo-stage training complete.', flush=True)
 
 
 if __name__ == '__main__':

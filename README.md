@@ -39,10 +39,10 @@ pip install torch numpy scipy scikit-learn netCDF4 tqdm
 
 ## Quick Start
 
-### Data
+### Training Data
 
-The small LLC training file used by the paper-scale examples is
-`llcGoes_gradT_trunc.nc`. Download it from Google Drive:
+The small LLC-subset training file used by the paper-scale examples is
+`llcGoes_gradT_trunc.nc`. Download it from Google Drive (around 125 GB):
 
 ```text
 https://drive.google.com/file/d/1fbwdcDnkHZ6UJMr4QM_qP2AFX9faAzeC/view?usp=sharing

@@ -235,6 +235,7 @@ gradient R2 values. It is included here to illustrate limitations of the existin
 GOFLOW approach under spatial transfer, not to introduce a new method. In the plot
 g referes to gradient (an average of the vorticity R2 and strain magnitude R2) and v to velocity R2. Note the wide variability of the 
 gradient accuracy from a 0.5 to as low as 0.19.
+![Stage 1 spatial transferability demo](docs/figures/spatial_transfer_stage1.png)
 
 This option is is already present in the existing repo but the larger LLC domain data is currently not provided due to its size, but will be included 
 as part of upcoming work.

@@ -44,9 +44,8 @@ pip install torch numpy scipy scikit-learn netCDF4 tqdm
 The small LLC-subset training file used by the paper-scale examples is
 `llcGoes_gradT_trunc.nc`. Download it from Google Drive (around 125 GB):
 
-```text
 https://drive.google.com/file/d/1fbwdcDnkHZ6UJMr4QM_qP2AFX9faAzeC/view?usp=sharing
-```
+
 Place the file in the repository root, or pass its location with `--llc_file`.
 ### GOES satellite inference Data
 The GOES datasets which have been used to generate the figures in the paper and for validation and testing are provided below.

@@ -238,7 +238,7 @@ GOFLOW approach under spatial transfer, not to introduce a new method. In the pl
 g referes to gradient (an average of the vorticity R2 and strain magnitude R2) and v to velocity R2. Note the wide variability of the 
 gradient accuracy from a 0.5 to as low as 0.19.
 
-![Stage 1 spatial transferability demo](figures/spatial_transfer_stage1.png)
+![Stage 1 spatial transferability demo](docs/figures/spatial_transfer_stage1.png)
 It uses
 the original GOFLOW architecture and training recipe with user-provided
 held-out spatial boxes and includes one example stage-1 fold map. This is a

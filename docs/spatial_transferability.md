@@ -40,6 +40,8 @@ checkpoint metrics for each fold.
 The figure below is an example stage-1 fold map from a larger LLC-domain demo.
 It shows held-out fold locations with the selected-checkpoint velocity and
 gradient R2 values. It is included to illustrate limitations of the existing
-GOFLOW approach under spatial transfer, not to introduce a new method.
+GOFLOW approach under spatial transfer, not to introduce a new method. In the plot
+g referes to gradient (an average of the vorticity R2 and strain magnitude R2) and v to velocity R2. Note the wide variability of the 
+gradient accuracy from a 0.5 to as low as 0.19.
 
 ![Stage 1 spatial transferability demo](figures/spatial_transfer_stage1.png)

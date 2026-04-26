@@ -280,15 +280,16 @@ def evaluate_model(
     total_spec_loss = 0.0
     count = 0
     
+    device = kernel_x.device
     with torch.no_grad():
         for batch in tqdm(test_loader, desc='Evaluating'):
             if len(batch) == 3:
                 x, y, valid = batch
-                valid = valid.to(kernel_x.device)
+                valid = valid.to(device)
             else:
                 x, y = batch
                 valid = None
-            x, y = x.to(kernel_x.device), y.to(kernel_x.device)
+            x, y = x.to(device), y.to(device)
             y_pred = model(x)
 
             # Spectral loss
@@ -302,6 +303,11 @@ def evaluate_model(
             total_r2 += r2
             total_spec_loss += spec_loss.item()
             count += 1
+            # MPS/CUDA cached allocator can balloon over many large batches.
+            if device.type == 'mps':
+                torch.mps.empty_cache()
+            elif device.type == 'cuda':
+                torch.cuda.empty_cache()
     
     return total_r2 / count, total_spec_loss / count
 
@@ -378,17 +384,17 @@ def train_model(
                 epoch, best_model, test_loader, kernel_x, kernel_y,
                 config.c_spec, model_str, config.output_dir
             )
-            
-            # Process satellite data
-            out_val, grad_val, sst_val = run_satellite_inference(
+
+            # Streaming satellite inference + write (bounded memory).
+            output_file = (f'preds_{model_str}_{config.step0}_{config.nframes}_'
+                           f'{config.c_spec}cs_'
+                           f'{os.path.splitext(os.path.basename(config.goes_file))[0]}.nc')
+            output_path = os.path.join(config.output_dir, output_file)
+            run_satellite_inference(
                 best_model, config.goes_file, config.valid_inds,
-                config.pm, config.pn
+                config.pm, config.pn, output_file=output_path
             )
-            
-            # Write satellite predictions
-            output_file = f'preds_{model_str}_{config.step0}_{config.nframes}_{config.c_spec}cs_{os.path.splitext(os.path.basename(config.goes_file))[0]}.nc'
-            write_satellite_netcdf(output_file, out_val, grad_val, sst_val,
-                                   config.valid_inds, config.goes_file)
+            writeGridSat(config.goes_file, output_path, config.valid_inds)
         
         if spec_loss < best_spec:
             best_spec = spec_loss
@@ -409,45 +415,86 @@ def run_satellite_inference(
     valid_inds: tuple,
     pm: float,
     pn: float,
-    batch_size: int = 4
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Run inference on GOES satellite data.
-    
-    Returns:
-        Tuple of (velocities, gradient_fields, sst_data)
+    batch_size: int = 8,
+    output_file: str = None,
+):
+    """Run inference on GOES satellite data.
+
+    If `output_file` is given, writes predictions batch-by-batch directly
+    to NetCDF (bounded memory). Otherwise accumulates in RAM and returns
+    (out_val, grad_val, sst_val) as before for backwards compatibility.
+
+    The streaming path is required for year-long inputs (~8700 samples)
+    where the in-RAM path would consume 10+ GB and OOM on MPS.
     """
     device = next(model.parameters()).device
     kernel_x = dx_kernel(pm).to(device)
     kernel_y = dy_kernel(pn).to(device)
-    
+
     goes_dataset = SatelliteDataset(goes_file, ['log_gradT'], valid_inds, train=False)
     nw = 0 if sys.platform == 'darwin' else 4
     goes_loader = DataLoader(goes_dataset, batch_size=batch_size, shuffle=False, num_workers=nw)
-    
-    out_list = []
-    grad_list = []
-    sst_list = []
-    
+
+    streaming = output_file is not None
+    if streaming:
+        nch_in = NCDataset(goes_file, 'r')
+        varnames = ['U', 'V', 'Vorticity', 'Divergence', 'Strain', 'BT', 'loggrad_BT']
+        nc = None  # opened on first batch once we know spatial size
+        cursor = 0
+    else:
+        out_list, grad_list, sst_list = [], [], []
+
     model.eval()
-    with torch.no_grad():
-        for sst in tqdm(goes_loader, desc='Satellite inference'):
-            # Store input SST
-            sst_list.append(sst[:, 1, :, :].cpu().numpy()[:, None, :, :])
-            
-            sst = sst.to(device)
-            out = model(sst)
-            out_list.append(out.cpu().numpy())
-            
-            # Compute gradient fields
-            ux, uy, vx, vy = compute_velocity_gradients(out, kernel_x, kernel_y)
-            vort, div, strain = compute_derived_fields(ux, uy, vx, vy)
-            grad_list.append(torch.stack((vort, div, strain), dim=1).cpu().numpy())
-    
+    try:
+        with torch.no_grad():
+            for sst in tqdm(goes_loader, desc='Satellite inference'):
+                sst_in = sst[:, 1, :, :].cpu().numpy()  # (B, H, W) middle frame
+                sst_dev = sst.to(device)
+                out = model(sst_dev)
+                ux, uy, vx, vy = compute_velocity_gradients(out, kernel_x, kernel_y)
+                vort, div, strain = compute_derived_fields(ux, uy, vx, vy)
+                out_np = out.cpu().numpy()
+                grad_np = torch.stack((vort, div, strain), dim=1).cpu().numpy()
+
+                if streaming:
+                    if nc is None:
+                        Ny, Nx = out_np.shape[-2:]
+                        nc = ncCreate(output_file, Nx, Ny, varnames, dt=2)
+                    bsize = out_np.shape[0]
+                    end = cursor + bsize
+                    nc.variables['U'][cursor:end]         = out_np[:, 0]
+                    nc.variables['V'][cursor:end]         = out_np[:, 1]
+                    nc.variables['Vorticity'][cursor:end] = grad_np[:, 0]
+                    nc.variables['Divergence'][cursor:end]= grad_np[:, 1]
+                    nc.variables['Strain'][cursor:end]    = grad_np[:, 2]
+                    nc.variables['loggrad_BT'][cursor:end]= sst_in
+                    # BT is at idx + 12 (middle of the 25-step input window)
+                    for i in range(bsize):
+                        global_t = cursor + i + 1 + 12
+                        nc.variables['BT'][cursor + i] = nch_in.variables['BT'][
+                            global_t, valid_inds[0]:valid_inds[1],
+                                       valid_inds[2]:valid_inds[3]]
+                    cursor = end
+                else:
+                    out_list.append(out_np)
+                    grad_list.append(grad_np)
+                    sst_list.append(sst_in[:, None, :, :])
+
+                if device.type == 'mps':
+                    torch.mps.empty_cache()
+                elif device.type == 'cuda':
+                    torch.cuda.empty_cache()
+    finally:
+        if streaming:
+            if nc is not None:
+                nc.close()
+            nch_in.close()
+
+    if streaming:
+        return cursor  # number of samples written
     out_val = np.concatenate(out_list, axis=0)
     grad_val = np.concatenate(grad_list, axis=0)
     sst_val = np.concatenate(sst_list, axis=0).squeeze()
-    
     return out_val, grad_val, sst_val
 
 
@@ -498,71 +545,76 @@ def write_test_results(
     model_str: str,
     output_dir: str = './ncfiles/'
 ):
-    """Write test set predictions and gradient fields to NetCDF."""
+    """Stream test set predictions and gradient fields to NetCDF.
+
+    Writes batch-by-batch to disk so peak memory stays bounded by the batch
+    size, not the whole test set. Earlier versions accumulated all batches
+    in RAM and OOM-killed on year-long runs (~2900 test samples).
+    """
     model.eval()
     device = next(model.parameters()).device
-    
-    inputs_list = []
-    outputs_list = []
-    targets_list = []
-    true_grads_list = []
-    pred_grads_list = []
-    
-    with torch.no_grad():
-        for batch in tqdm(test_loader, desc='Processing test set'):
-            if len(batch) == 3:
-                x, y_true, _valid = batch
-            else:
-                x, y_true = batch
-            x, y_true = x.to(device), y_true.to(device)
-            y_pred = model(x)
-            
-            # Compute gradients
-            ux_true, uy_true, vx_true, vy_true = compute_velocity_gradients(y_true, kernel_x, kernel_y)
-            ux_pred, uy_pred, vx_pred, vy_pred = compute_velocity_gradients(y_pred, kernel_x, kernel_y)
-            
-            vort_true, div_true, strain_true = compute_derived_fields(ux_true, uy_true, vx_true, vy_true)
-            vort_pred, div_pred, strain_pred = compute_derived_fields(ux_pred, uy_pred, vx_pred, vy_pred)
-            
-            inputs_list.append(x[:, 1, :, :].cpu().numpy())
-            outputs_list.append(y_pred.cpu().numpy())
-            targets_list.append(y_true.cpu().numpy())
-            true_grads_list.append(torch.stack((vort_true, div_true, strain_true), dim=1).cpu().numpy())
-            pred_grads_list.append(torch.stack((vort_pred, div_pred, strain_pred), dim=1).cpu().numpy())
-    
-    # Concatenate batches
-    inputs = np.concatenate(inputs_list, axis=0)
-    outputs = np.concatenate(outputs_list, axis=0)
-    targets = np.concatenate(targets_list, axis=0)
-    true_grads = np.concatenate(true_grads_list, axis=0)
-    pred_grads = np.concatenate(pred_grads_list, axis=0)
-    
-    # Write NetCDF
+
     os.makedirs(output_dir, exist_ok=True)
     nc_filename = os.path.join(output_dir, f'test_{model_str}_{c_spec}cspec.nc')
-    
-    Nt, Ny, Nx = inputs.shape
     varlist = ['gradT', 'U_inp', 'V_inp', 'vort_inp', 'div_inp', 'strain_inp',
                'U_out', 'V_out', 'vort_out', 'div_out', 'strain_out']
-    
-    with ncCreate(nc_filename, Nx, Ny, varlist) as nc:
-        nc.variables['gradT'][:] = inputs
-        nc.variables['U_inp'][:] = targets[:, 0, :, :]
-        nc.variables['V_inp'][:] = targets[:, 1, :, :]
-        nc.variables['U_out'][:] = outputs[:, 0, :, :]
-        nc.variables['V_out'][:] = outputs[:, 1, :, :]
-        nc.variables['vort_inp'][:] = true_grads[:, 0, :, :]
-        nc.variables['div_inp'][:] = true_grads[:, 1, :, :]
-        nc.variables['strain_inp'][:] = true_grads[:, 2, :, :]
-        nc.variables['vort_out'][:] = pred_grads[:, 0, :, :]
-        nc.variables['div_out'][:] = pred_grads[:, 1, :, :]
-        nc.variables['strain_out'][:] = pred_grads[:, 2, :, :]
-        
-        nc.description = f'Test set results for epoch {epoch}'
-        nc.input_field = 'SST gradient (middle time step)'
-        nc.output_fields = 'Vorticity, Divergence, Strain (target and predicted)'
-    
-    print(f'Test results written to {nc_filename}')
+
+    nc = None
+    cursor = 0
+    try:
+        with torch.no_grad():
+            for batch in tqdm(test_loader, desc='Processing test set'):
+                if len(batch) == 3:
+                    x, y_true, _valid = batch
+                else:
+                    x, y_true = batch
+                x, y_true = x.to(device), y_true.to(device)
+                y_pred = model(x)
+
+                ux_true, uy_true, vx_true, vy_true = compute_velocity_gradients(y_true, kernel_x, kernel_y)
+                ux_pred, uy_pred, vx_pred, vy_pred = compute_velocity_gradients(y_pred, kernel_x, kernel_y)
+                vort_true, div_true, strain_true = compute_derived_fields(ux_true, uy_true, vx_true, vy_true)
+                vort_pred, div_pred, strain_pred = compute_derived_fields(ux_pred, uy_pred, vx_pred, vy_pred)
+
+                gradT_b   = x[:, 1, :, :].cpu().numpy()
+                targets_b = y_true.cpu().numpy()
+                outputs_b = y_pred.cpu().numpy()
+                true_grads_b = torch.stack((vort_true, div_true, strain_true), dim=1).cpu().numpy()
+                pred_grads_b = torch.stack((vort_pred, div_pred, strain_pred), dim=1).cpu().numpy()
+
+                if nc is None:
+                    Ny, Nx = gradT_b.shape[-2:]
+                    nc = ncCreate(nc_filename, Nx, Ny, varlist)
+                    nc.description = f'Test set results for epoch {epoch}'
+                    nc.input_field = 'SST gradient (middle time step)'
+                    nc.output_fields = 'Vorticity, Divergence, Strain (target and predicted)'
+
+                bsize = gradT_b.shape[0]
+                end = cursor + bsize
+                nc.variables['gradT'][cursor:end]      = gradT_b
+                nc.variables['U_inp'][cursor:end]      = targets_b[:, 0]
+                nc.variables['V_inp'][cursor:end]      = targets_b[:, 1]
+                nc.variables['U_out'][cursor:end]      = outputs_b[:, 0]
+                nc.variables['V_out'][cursor:end]      = outputs_b[:, 1]
+                nc.variables['vort_inp'][cursor:end]   = true_grads_b[:, 0]
+                nc.variables['div_inp'][cursor:end]    = true_grads_b[:, 1]
+                nc.variables['strain_inp'][cursor:end] = true_grads_b[:, 2]
+                nc.variables['vort_out'][cursor:end]   = pred_grads_b[:, 0]
+                nc.variables['div_out'][cursor:end]    = pred_grads_b[:, 1]
+                nc.variables['strain_out'][cursor:end] = pred_grads_b[:, 2]
+                cursor = end
+
+                # Free per-batch numpy arrays + cached MPS allocator memory.
+                del gradT_b, targets_b, outputs_b, true_grads_b, pred_grads_b
+                if device.type == 'mps':
+                    torch.mps.empty_cache()
+                elif device.type == 'cuda':
+                    torch.cuda.empty_cache()
+    finally:
+        if nc is not None:
+            nc.close()
+
+    print(f'Test results written to {nc_filename}  ({cursor} samples)')
 
 
 # =============================================================================
@@ -617,9 +669,14 @@ def main():
     
     # Batch sizes depend on model complexity
     if args.model == 'samudra0' or args.nbase == 32:
-        batch_sizes = {'train': 32, 'test': 100, 'valid': 25}
+        batch_sizes = {'train': 32, 'test': 32, 'valid': 25}
     else:
-        batch_sizes = {'train': 64, 'test': 200, 'valid': 50}
+        # Test batch was 200 historically, but the year-long test set has
+        # ~2900 samples and that batch overran macOS memory pressure on MPS.
+        # 64 is enough to amortize forward-pass overhead while keeping peak
+        # memory bounded. Validation batch reduced from 50 -> 32 for the same
+        # reason on the GOES-year inference loop.
+        batch_sizes = {'train': 64, 'test': 64, 'valid': 32}
     
     # Load datasets
     varlist = ['loggrad_T', 'U', 'V']
@@ -684,15 +741,17 @@ def main():
     np.save(f'r2_{model_str}_ver_{args.c_spec}cs.npy', r2_history)
     save_model(best_model, f'{model_str}_{args.step0}_{args.nframes}_{args.c_spec}cs.pth')
     
-    # Final satellite inference
-    out_val, grad_val, sst_val = run_satellite_inference(
+    # Final satellite inference (streaming write — bounded memory).
+    output_file = (f'preds_{model_str}_{args.step0}_{args.nframes}_'
+                   f'{args.c_spec}cs_'
+                   f'{os.path.splitext(os.path.basename(args.goes_file))[0]}.nc')
+    output_path = os.path.join(args.output_dir, output_file)
+    run_satellite_inference(
         best_model, args.goes_file, args.valid_inds,
-        args.pm, args.pn
+        args.pm, args.pn, output_file=output_path
     )
-    
-    output_file = f'preds_{model_str}_{args.step0}_{args.nframes}_{args.c_spec}cs_{os.path.splitext(os.path.basename(args.goes_file))[0]}.nc'
-    write_satellite_netcdf(output_file, out_val, grad_val, sst_val, args.valid_inds, args.goes_file)
-    
+    writeGridSat(args.goes_file, output_path, args.valid_inds)
+
     print('Training complete!')
 
 

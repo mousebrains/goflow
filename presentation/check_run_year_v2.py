@@ -1,11 +1,11 @@
-"""Check on the year-long two-stage GOFLOW training (data/run_year_v1/).
+"""Check on the year-long two-stage GOFLOW training (data/run_year_v2/).
 
 Reports process state, current stage, epoch progress, latest metrics, and
 artifact existence. Runs the stage-1 quicklook automatically once stage 1
 is complete. Safe to invoke any time during or after the run.
 
 Run:
-    python presentation/check_run_year_v1.py
+    python presentation/check_run_year_v2.py
 """
 import os
 import re
@@ -19,8 +19,8 @@ import matplotlib.pyplot as plt
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-RUN_DIR = os.path.join(ROOT, 'data', 'run_year_v1')
-LOG = os.path.join(RUN_DIR, 'run_year_v1.log')
+RUN_DIR = os.path.join(ROOT, 'data', 'run_year_v2')
+LOG = os.path.join(RUN_DIR, 'run_year_v2.log')
 START_FILE = os.path.join(RUN_DIR, 'start.txt')
 STAGE1_PTH = os.path.join(RUN_DIR, 'lgt_unet16_1_3_0.0cs.pth')
 STAGE2_PTH = os.path.join(RUN_DIR, 'lgt_unet16_1_3_0.2cs.pth')

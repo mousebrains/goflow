@@ -30,10 +30,21 @@ SKIP_TYPES = {'permission-mode', 'file-history-snapshot', 'last-prompt',
               'queue-operation', 'system', 'attachment'}
 
 
+SELF_RENDER_MARKER = 'GOFLOW session script — for video reproduction'
+RE_TURN_HEADING = re.compile(r'^## Turn \d+ — \d{4}-\d{2}-\d{2}T', re.MULTILINE)
+
+
 def truncate(text, max_lines):
     """Trim long text blocks while keeping head + tail context."""
     if text is None:
         return ''
+    n_self = (text.count(SELF_RENDER_MARKER) +
+              len(RE_TURN_HEADING.findall(text)))
+    if n_self > 0:
+        # A tool result that contains a copy of this rendered script (e.g.
+        # `head/cat/sed session_script.md`). Leaving it in produces confusing
+        # nested turn headings; elide instead.
+        return f'[excerpt of session_script.md elided ({n_self} marker(s))]'
     lines = text.splitlines()
     if len(lines) <= max_lines:
         return text

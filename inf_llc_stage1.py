@@ -67,6 +67,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--blend_alpha', type=float, default=0.5,
                         help='Blend factor for test results: alpha*true + (1-alpha)*pred')
 
+    # Satellite frame stride (matches GOES file cadence)
+    parser.add_argument('--sat_stride', type=int, default=12,
+                        help='Index stride between the three input frames in the satellite '
+                             'file. 12 for 5-min cadence (paper files); 1 for 1-hr cadence.')
+
+    # Spatial bounding box for satellite inference
+    parser.add_argument('--valid_inds', type=int, nargs=4, default=None,
+                        metavar=('Y0', 'Y1', 'X0', 'X1'),
+                        help='Spatial bounding box (y0 y1 x0 x1) for satellite inference. '
+                             'Each side must be a multiple of 16 (UNet downsampling). '
+                             'Defaults to (0, 512, Nx-768, Nx) — bottom-right 512x768.')
+
     # Flags
     parser.add_argument('--skip_test', action='store_true',
                         help='Skip test set evaluation')
@@ -166,7 +178,8 @@ def process_satellite_data(
     valid_inds: tuple,
     pm: float,
     pn: float,
-    batch_size: int = 4
+    batch_size: int = 4,
+    stride: int = 12,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Run inference on GOES satellite data.
@@ -186,8 +199,9 @@ def process_satellite_data(
     kernel_x = dx_kernel(pm).to(device)
     kernel_y = dy_kernel(pn).to(device)
 
-    goes_dataset = SatelliteDataset(goes_file, ['log_gradT'], valid_inds, train=False)
-    goes_loader = DataLoader(goes_dataset, batch_size=batch_size, shuffle=False, num_workers=4)
+    goes_dataset = SatelliteDataset(goes_file, ['log_gradT'], valid_inds,
+                                    train=False, stride=stride)
+    goes_loader = DataLoader(goes_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
 
     out_list = []
     grad_list = []
@@ -225,7 +239,8 @@ def write_satellite_netcdf(
     grad_val: np.ndarray,
     sst_val: np.ndarray,
     valid_inds: tuple,
-    goes_file: str
+    goes_file: str,
+    stride: int = 12,
 ):
     """
     Write satellite prediction results to NetCDF.
@@ -246,10 +261,10 @@ def write_satellite_netcdf(
         nc = ncCreate(output_file, nx, ny, varnames, dt=2)
 
         for it in tqdm(range(nt), desc='Writing NetCDF'):
-            BT = nch.variables['BT'][it + 12,
+            BT = nch.variables['BT'][it + stride,
                                      valid_inds[0]:valid_inds[1],
                                      valid_inds[2]:valid_inds[3]]
-            mask = nch.variables['mask'][it + 12,
+            mask = nch.variables['mask'][it + stride,
                                          valid_inds[0]:valid_inds[1],
                                          valid_inds[2]:valid_inds[3]]
 
@@ -375,7 +390,10 @@ def main():
         Ny = nc.dimensions['lat'].size
 
     # Define spatial indices
-    valid_inds = (0, 512, Nx - 768, Nx)
+    if args.valid_inds is None:
+        valid_inds = (0, 512, Nx - 768, Nx)
+    else:
+        valid_inds = tuple(args.valid_inds)
     test_inds = (0, 256, Nx - 256, Nx)
 
     # Initialize model (inp_norm=False for legacy models by default)
@@ -433,17 +451,28 @@ def main():
                 continue
 
             print(f'Processing {goes_file}...')
-            output_file = f'preds_{os.path.basename(args.model_file).replace(".pth", "")}_{goes_file}'
+            os.makedirs(args.output_dir, exist_ok=True)
+            goes_root, goes_ext = os.path.splitext(os.path.basename(goes_file))
+            suffix = (f'_y{valid_inds[0]}-{valid_inds[1]}'
+                      f'_x{valid_inds[2]}-{valid_inds[3]}'
+                      if args.valid_inds is not None else '')
+            output_file = os.path.join(
+                args.output_dir,
+                f'preds_{os.path.basename(args.model_file).replace(".pth", "")}'
+                f'_{goes_root}{suffix}{goes_ext}',
+            )
 
             out_val, grad_val, sst_val = process_satellite_data(
                 model, goes_file, valid_inds,
                 pm=args.pm, pn=args.pn,
-                batch_size=args.batch_size
+                batch_size=args.batch_size,
+                stride=args.sat_stride,
             )
 
             write_satellite_netcdf(
                 output_file, out_val, grad_val, sst_val,
-                valid_inds, goes_file
+                valid_inds, goes_file,
+                stride=args.sat_stride,
             )
 
     print('\nInference complete!')

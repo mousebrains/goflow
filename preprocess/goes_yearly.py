@@ -38,6 +38,9 @@ parser.add_argument('--output', default='data/goes_2023_full.nc')
 parser.add_argument('--cache',  default='data/_goes_cache_year')
 parser.add_argument('--workers', type=int, default=8,
                     help='Concurrent S3 download threads')
+parser.add_argument('--per-hour', type=int, default=1,
+                    help='Files per hour to keep: 1 = first only (hourly cadence), '
+                         '0 = all (5-min cadence, ~12x data)')
 ARGS = parser.parse_args()
 
 LAT_MIN, LAT_MAX = ARGS.lat_min, ARGS.lat_max
@@ -65,18 +68,26 @@ def daterange(start, end):
         cur += timedelta(days=1)
 
 
-def list_first_per_hour(fs, year, day):
-    """Return one Channel-14 RadC file per hour of the given day, or None."""
+def list_per_hour(fs, year, day, per_hour=1):
+    """Return Channel-14 RadC files for the given day.
+
+    per_hour: 1 = first file each hour (hourly cadence, ~24/day),
+              0 = all files (5-min cadence, ~288/day).
+    """
     out = []
     for h in range(24):
         prefix = f'{BUCKET}/{SECTOR}/{year}/{day:03d}/{h:02d}'
         try:
             files = fs.ls(prefix, detail=False)
             c14 = sorted(f for f in files if f'C{CHANNEL:02d}' in f)
-            out.append(c14[0] if c14 else None)
+            if per_hour == 1:
+                out.append(c14[0] if c14 else None)
+            else:
+                out.extend(c14)
         except Exception as e:
             print(f'  list ERR {prefix}: {e}')
-            out.append(None)
+            if per_hour == 1:
+                out.append(None)
     return out
 
 
@@ -141,7 +152,11 @@ def project_to_latlon(local_path):
     log_grad[valid] = np.log(mag[valid])
     log_grad = np.clip(log_grad, -19, 0)
     mask = (np.isfinite(bt_grid) & (bt_grid > 270.0)).astype(np.uint8)
-    t_sec = float(ds.t.values)
+    # ABI L1b stores t as "seconds since 2000-01-01 12:00:00" (J2000), but xarray
+    # auto-decodes it to datetime64[ns]. float() on that gives ns-since-1970.
+    # Convert back to seconds since J2000 to match the file's units attribute.
+    J2000 = np.datetime64('2000-01-01T12:00:00')
+    t_sec = float((ds.t.values - J2000) / np.timedelta64(1, 's'))
     ds.close()
     return bt_grid, log_grad, mask, t_sec
 
@@ -177,8 +192,10 @@ def main():
     os.makedirs(ARGS.cache, exist_ok=True)
     fs = s3fs.S3FileSystem(anon=True)
     days = list(daterange(ARGS.start, ARGS.end))
+    frames_per_day = 24 if ARGS.per_hour == 1 else 288
+    target_total = frames_per_day * len(days)
     print(f'GOES yearly: {ARGS.start} -> {ARGS.end} ({len(days)} days, '
-          f'{24*len(days)} target frames)')
+          f'~{target_total} target frames @ {frames_per_day}/day)')
     print(f'  region:  lat {LAT_MIN}-{LAT_MAX}, lon {LON_MIN}-{LON_MAX}')
     print(f'  grid:    {NLAT} x {NLON}  (~{DLAT*111:.1f} km)')
     print(f'  output:  {ARGS.output}')
@@ -192,7 +209,7 @@ def main():
     for day in days:
         year = day.year
         doy  = day.timetuple().tm_yday
-        keys = list_first_per_hour(fs, year, doy)
+        keys = list_per_hour(fs, year, doy, per_hour=ARGS.per_hour)
         with ThreadPoolExecutor(max_workers=ARGS.workers) as ex:
             local_paths = list(ex.map(lambda k: download(fs, k), keys))
 
@@ -222,8 +239,8 @@ def main():
         write_t += nt
         elapsed = time.time() - t_overall
         rate = write_t / elapsed if elapsed > 0 else 0
-        eta = (24 * len(days) - write_t) / rate / 60 if rate > 0 else 0
-        print(f'  {day.date()}: +{nt}  total {write_t}/{24*len(days)}  '
+        eta = (target_total - write_t) / rate / 60 if rate > 0 else 0
+        print(f'  {day.date()}: +{nt}  total {write_t}/{target_total}  '
               f'rate {rate:.1f} fr/s  ETA {eta:.0f} min')
         del bt_list, lg_list, mk_list, t_list, bt_arr, lg_arr, mk_arr, t_arr
         gc.collect()

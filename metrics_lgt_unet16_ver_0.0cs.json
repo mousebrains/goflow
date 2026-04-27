@@ -1,0 +1,54 @@
+{
+  "config": {
+    "c_spec": 0.0,
+    "cuda": 0,
+    "epochs": 1,
+    "fold": -1,
+    "goes_file": "/tmp/no_such_goes.nc",
+    "kernel_size": 5,
+    "llc_file": "data/llc_pangeo_bigger_2012-04-08_to_2012-04-21.nc",
+    "lr": 0.001,
+    "metrics_file": "",
+    "model": "unet",
+    "nbase": 16,
+    "nframes": 3,
+    "output_dir": "/tmp/mps_test_out",
+    "pm": 5.0,
+    "pn": 5.0,
+    "regions_file": "",
+    "skip_eval_nc": true,
+    "skip_satellite": true,
+    "step0": 1,
+    "tcycle": 5,
+    "use_grad_loss": false,
+    "valid_inds": [
+      0,
+      512,
+      898,
+      1666
+    ]
+  },
+  "history": {
+    "gradient_r2": [
+      -1.0134119987487793
+    ],
+    "spec_loss": [
+      45.947654724121094
+    ],
+    "velocity_r2": [
+      -0.12078225612640381
+    ]
+  },
+  "summary": {
+    "best_gradient_epoch": 1,
+    "best_gradient_r2": -1.0134119987487793,
+    "best_spec_epoch": 1,
+    "best_spec_loss": 45.947654724121094,
+    "best_velocity_epoch": 1,
+    "best_velocity_r2": -0.12078225612640381,
+    "selected_epoch": 1,
+    "selected_gradient_r2": -1.0134119987487793,
+    "selected_spec_loss": 45.947654724121094,
+    "selected_velocity_r2": -0.12078225612640381
+  }
+}

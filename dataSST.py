@@ -95,7 +95,9 @@ class SatelliteDataset(Dataset):
     PyTorch Dataset for GOES satellite brightness temperature data.
 
     Loads 3-frame sequences of satellite observations with optional velocity targets.
-    Uses 12-hour spacing between frames (indices i, i+12, i+24).
+    Frames are spaced `stride` indices apart (indices i, i+stride, i+2*stride).
+    With paper's 5-min cadence GOES files, stride=12 gives 60-min frame spacing;
+    with hourly cadence files, stride=1 gives the same effective 60-min spacing.
 
     Args:
         nc_path: Path to satellite NetCDF file
@@ -103,17 +105,19 @@ class SatelliteDataset(Dataset):
         spatial_slice: Tuple (y0, y1, x0, x1) for spatial subsetting
         train: If True, return (input, target) tuples; if False, return input only
         gridField: Optional grid parameters to concatenate with input
+        stride: Index stride between the three input frames (default 12 = paper's 5-min file)
     """
 
-    def __init__(self, nc_path, var_names, spatial_slice, train=True, gridField=None):
+    def __init__(self, nc_path, var_names, spatial_slice, train=True, gridField=None, stride=12):
         self.nc_path = nc_path
         self.var_names = var_names
         self.train = train
         self.spatial_slice = spatial_slice
         self.gridField = gridField
+        self.stride = stride
 
         self.nch = load(self.nc_path, 'r')
-        self.time_len = self.nch.dimensions['time'].size - 25
+        self.time_len = self.nch.dimensions['time'].size - 2*stride - 1
 
     def __len__(self):
         return self.time_len
@@ -122,11 +126,11 @@ class SatelliteDataset(Dataset):
         # Adjust index to start from the second sample (idx + 1)
         idx = idx + 1
 
-        # Get SST slices at i, i+12, and i+24
+        # Get SST slices at i, i+stride, i+2*stride
         sst_slices = [
             getData(self.nch, self.var_names[0], self.spatial_slice, idx),
-            getData(self.nch, self.var_names[0], self.spatial_slice, idx + 12),
-            getData(self.nch, self.var_names[0], self.spatial_slice, idx + 24)
+            getData(self.nch, self.var_names[0], self.spatial_slice, idx + self.stride),
+            getData(self.nch, self.var_names[0], self.spatial_slice, idx + 2*self.stride)
         ]
         
         sst_slices = np.stack(sst_slices, axis=0)
@@ -144,9 +148,9 @@ class SatelliteDataset(Dataset):
             input_slice = np.nan_to_num(sst_slices.astype(np.float32))
 
         if self.train:
-            # Get velocity fields at the middle time step (i+12)
-            u_slice = getData(self.nch, self.var_names[1], self.spatial_slice, idx + 12)
-            v_slice = getData(self.nch, self.var_names[2], self.spatial_slice, idx + 12)
+            # Get velocity fields at the middle time step (i+stride)
+            u_slice = getData(self.nch, self.var_names[1], self.spatial_slice, idx + self.stride)
+            v_slice = getData(self.nch, self.var_names[2], self.spatial_slice, idx + self.stride)
             uv_slice = np.nan_to_num(
                 np.stack((u_slice, v_slice), axis=0).astype(np.float32))
             return input_slice, uv_slice
